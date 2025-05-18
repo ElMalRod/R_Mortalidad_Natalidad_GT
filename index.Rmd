@@ -1,0 +1,349 @@
+---
+title:  "Análisis de natalidad y muerte en Guatemala (2021‑2023)"
+author: "Luis Emilio Maldonado Rodríguez – 201931707"
+date:   "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 8,
+  fig.height = 5,
+  fig.align  = "center"
+)
+
+# Paquetes
+pkgs <- c(
+  "readxl","dplyr","purrr","janitor","readr",
+  "ggplot2","scales","lubridate","tidyr","ggridges"
+)
+to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
+if(length(to_install)) install.packages(to_install, dependencies = TRUE)
+invisible(lapply(pkgs, library, character.only = TRUE))
+```
+
+## 1 · Carga y limpieza de datos
+
+```{r datos}
+# Carpeta raíz
+root_dir <- "C:/Users/PC/Documents/Modelacion y Simulacion/Analisis de natalidad y muerte en Guatemala"
+
+years      <- 2021:2023
+path_birth <- file.path(root_dir,"Data","Natalidad",
+                        paste0("nacimientos-",years,".xlsx"))
+path_death <- file.path(root_dir,"Data","Muerte",
+                        paste0("defunciones-",years,".xlsx"))
+
+leer_vitales <- function(path, anio){
+  readxl::read_excel(path, col_types = "text", .name_repair = "unique") |>
+    janitor::clean_names() |>
+    dplyr::mutate(anio = as.integer(anio))
+}
+
+birth_list <- purrr::map2(path_birth, years, leer_vitales) |>
+  purrr::map(readr::type_convert, na = c("","NA","999"))
+death_list <- purrr::map2(path_death, years, leer_vitales) |>
+  purrr::map(readr::type_convert, na = c("","NA","999"))
+
+harmonizar <- function(lst){
+  cols_char <- unique(unlist(
+    purrr::map(lst, ~ names(.x)[vapply(.x,is.character,logical(1))])))
+  purrr::map(lst, ~ dplyr::mutate(.x,
+                                  dplyr::across(all_of(cols_char), as.character)))
+}
+birth_list <- harmonizar(birth_list)
+death_list <- harmonizar(death_list)
+
+nacimientos <- dplyr::bind_rows(birth_list)
+defunciones <- dplyr::bind_rows(death_list)
+
+# re‑codificar valores vacíos
+na_recode <- function(df){
+  df |>
+    dplyr::mutate(across(where(is.character), ~ dplyr::na_if(.x,""))) |>
+    dplyr::mutate(across(where(is.character), ~ dplyr::na_if(.x,"NA"))) |>
+    dplyr::mutate(across(where(is.character), ~ dplyr::na_if(.x,"999"))) |>
+    janitor::remove_empty("rows") |>
+    janitor::remove_empty("cols")
+}
+nacimientos <- na_recode(nacimientos)
+defunciones <- na_recode(defunciones)
+```
+
+### Diccionario de departamentos
+
+```{r deptos, echo=FALSE}
+departamentos <- c(
+  `1` ="Guatemala",     `2` ="El Progreso",   `3` ="Sacatepéquez",
+  `4` ="Chimaltenango", `5` ="Escuintla",     `6` ="Santa Rosa",
+  `7` ="Sololá",        `8` ="Totonicapán",   `9` ="Quetzaltenango",
+  `10`="Suchitepéquez", `11`="Retalhuleu",    `12`="San Marcos",
+  `13`="Huehuetenango", `14`="Quiché",        `15`="Baja Verapaz",
+  `16`="Alta Verapaz",  `17`="Petén",         `18`="Izabal",
+  `19`="Zacapa",        `20`="Chiquimula",    `21`="Jalapa",
+  `22`="Jutiapa"
+)
+```
+
+## 2 · Exploración inicial
+
+```{r exploracion}
+str(nacimientos, max.level = 1)
+str(defunciones, max.level = 1)
+
+cat("\\nDimensiones → Nacimientos:", dim(nacimientos),
+    "| Defunciones:", dim(defunciones), "\\n")
+
+na_birth <- colSums(is.na(nacimientos)); na_birth[na_birth>0]
+na_death <- colSums(is.na(defunciones)); na_death[na_death>0]
+```
+
+### Resumen estadístico (variables numéricas)
+
+```{r resumen-num}
+summary(dplyr::select(nacimientos, where(is.numeric)))
+summary(dplyr::select(defunciones, where(is.numeric)))
+```
+
+## 3 · Visualizaciones clave
+
+```{r pre-graf, include=FALSE}
+nacimientos <- nacimientos |>
+  mutate(peso_gr = libras*453.592 + onzas*28.3495)
+```
+
+### 3.1 Nacimientos totales por año (barras simples)
+
+```{r p1_barras, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Nacimientos totales por año (2021-2023)"}
+nac_anuales <- nacimientos |> count(anio)
+
+ggplot(nac_anuales, aes(factor(anio), n)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = scales::comma(n)), vjust = -0.4, size = 3.8) +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0, .05))) +
+  labs(title = "Nacimientos totales por año (2021-2023)",
+       x = "Año",
+       y = "Número de nacimientos")
+```
+
+```{r desc_p1_barras, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 1**  
+Muestra la cantidad total de nacimientos por año.  
+- *2021 → 2022*: ligero incremento (unos cientos de nacimientos).  
+- *2022 → 2023*: descenso más pronunciado; 2023 cae por debajo de 2021.  
+
+Balance del trienio: disminución neta aproximada de **0,6 %** tras un breve repunte en 2022.
+")
+```
+
+### 3.2 Nacimientos por sexo y año (barras agrupadas)
+
+```{r p2_barras_sexo, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Nacimientos por sexo y año"}
+ggplot(nacimientos |> count(anio, sexo),
+       aes(factor(anio), n,
+           fill = factor(sexo, labels = c('Hombre','Mujer')))) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c('#1f77b4','#ff7f0e'), name = 'Sexo') +
+  labs(title = 'Nacimientos por sexo y año',
+       x = 'Año', y = 'Número de nacimientos')
+```
+
+```{r desc_p2_barras_sexo, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 2**  
+- H > M cada año (~51 % vs 49 %).  
+- 2021 → 2022: ligero aumento en ambos sexos.  
+- 2022 → 2023: descenso similar para H y M; la brecha se mantiene.
+")
+```
+
+### 3.3 Distribución de edad materna (boxplot)
+
+```{r p3_box, echo=FALSE, fig.cap="Distribución de edad materna por año"}
+ggplot(nacimientos, aes(factor(anio), edadm)) +
+  geom_boxplot() +
+  labs(title='Distribución de edad materna por año', x='Año', y='Edad de la madre')
+```
+
+```{r desc_p3_box, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 3**  
+Caja 20-30 años; mediana ≈ 25-26 años.  
+Distribución casi idéntica 2021-2023; pocos partos <15 o >45 años.
+")
+```
+
+### 3.4 Histograma del peso al nacer
+
+```{r p4_hist, echo=FALSE, fig.cap="Peso al nacer (1 000–6 000 g)"}
+nac_limpio <- nacimientos |> 
+  mutate(libras=ifelse(libras<=15,libras,NA),
+         onzas =ifelse(onzas <=15, onzas,NA),
+         peso_gr=libras*453.592 + onzas*28.3495) |> 
+  filter(dplyr::between(peso_gr,1000,6000))
+media_peso <- mean(nac_limpio$peso_gr, na.rm=TRUE)
+
+ggplot(nac_limpio, aes(peso_gr)) +
+  geom_histogram(binwidth=250, fill='skyblue', color='black') +
+  geom_vline(xintercept=media_peso, linetype='dashed', color='red', linewidth=1) +
+  scale_x_continuous(labels=scales::comma) +
+  labs(title='Peso al nacer (1 000–6 000 g)',
+       subtitle=paste('Media =', round(media_peso),'g'),
+       x='Peso (g)', y='Frecuencia')
+```
+
+```{r desc_p4_hist, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 4**  
+Media ≈ 3 011 g; mayor concentración 2 500–3 500 g.  
+Pocos < 2 500 g (bajo peso) y > 4 000 g (macrosomía).
+")
+```
+
+### 3.5 Heat‑map de nacimientos por mes
+
+```{r p5_heat, echo=FALSE, fig.cap="Nacimientos por mes y año"}
+nacimientos |> 
+  filter(dplyr::between(mesocu,1,12)) |> 
+  mutate(mes_lab=factor(mesocu, levels=1:12, labels=month.abb)) |> 
+  count(anio, mes_lab) |> 
+  tidyr::complete(anio, mes_lab, fill=list(n=0)) |> 
+  ggplot(aes(mes_lab, factor(anio), fill=n)) +
+  geom_tile(color='grey90') +
+  scale_fill_viridis_c(option='C', labels=scales::comma, name='Nacimientos') +
+  labs(title='Nacimientos por mes y año', x='Mes', y='Año') +
+  theme_minimal(base_size=12) +
+  theme(panel.grid=element_blank())
+```
+
+```{r desc_p5_heat, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 5**  
+Pico Jun–Sep (máx. Sep-2021 >32 k).  
+Mínimos en febreros (~24 k).  
+Tonos más fríos en 2023 ⇒ menor volumen general.
+")
+```
+
+### 3.6 Top‑10 departamentos de nacimiento (lollipop)
+
+```{r p6_lollipop, echo=FALSE, fig.cap="Top‑10 departamentos con más nacimientos"}
+top_dep <- nacimientos |> 
+  mutate(dep_nombre = departamentos[as.character(depreg)]) |> 
+  count(dep_nombre, sort=TRUE) |> 
+  slice_head(n=10) |> 
+  arrange(n)
+
+ggplot(top_dep, aes(n, reorder(dep_nombre,n))) +
+  geom_segment(aes(xend=0,yend=dep_nombre), linewidth=1) +
+  geom_point(size=3, color='steelblue') +
+  labs(title='Top‑10 departamentos con más nacimientos', x='Número de nacimientos', y='')
+```
+
+```{r desc_p6_lollipop, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 6**  
+Guatemala ~165 k (≈2× Alta Verapaz).  
+Top-3 (Guate, Alta V., Huehue) ≈45 % del total.  
+Volumen cae gradualmente hasta Suchitepéquez (~48 k).
+")
+```
+
+### 3.7 Peso medio vs edad de la madre (línea)
+
+```{r p7_line, echo=FALSE, fig.cap="Peso medio al nacer vs edad de la madre"}
+nac_line <- nacimientos |> 
+  mutate(libras=ifelse(libras<=15,libras,NA),
+         onzas =ifelse(onzas <=15, onzas,NA),
+         peso_gr=libras*453.592 + onzas*28.3495) |> 
+  filter(dplyr::between(peso_gr,1000,6000), dplyr::between(edadm,10,50)) |> 
+  group_by(edadm) |> summarise(peso_medio=mean(peso_gr,na.rm=TRUE), .groups='drop')
+
+ggplot(nac_line, aes(edadm, peso_medio)) +
+  geom_line(linewidth=1, color='steelblue') +
+  geom_point(size=1.8, color='steelblue') +
+  scale_y_continuous(labels=scales::comma) +
+  labs(title='Peso medio al nacer vs edad materna',
+       x='Edad de la madre (años)', y='Peso medio (g)')
+```
+
+```{r desc_p7_line, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 7**  
+↑ rápido 10→25; pico ~3 050 g a 30-35.  
+Leve descenso >35; <3 000 g y mayor variabilidad >45.
+")
+```
+
+### 3.8 Distribución de peso por sexo (violín)
+
+```{r p8_violin, echo=FALSE, fig.cap="Distribución de peso al nacer por sexo"}
+nac_violin <- nacimientos |> 
+  mutate(libras=ifelse(libras<=15,libras,NA),
+         onzas =ifelse(onzas <=15, onzas,NA),
+         peso_gr=libras*453.592+ onzas*28.3495) |> 
+  filter(dplyr::between(peso_gr,1000,6000), sexo%in%1:2)
+
+ggplot(nac_violin, aes(factor(sexo, labels=c('Hombre','Mujer')), peso_gr, fill=factor(sexo))) +
+  geom_violin(trim=FALSE, alpha=.8, show.legend=FALSE) +
+  stat_summary(fun=median, geom='point', size=2, color='black') +
+  scale_y_continuous(labels=scales::comma) +
+  labs(title='Peso al nacer por sexo (1 000–6 000 g)', x='Sexo', y='Peso (g)')
+```
+
+```{r desc_p8_violin, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 8**  
+Distribuciones casi idénticas.  
+Mediana ♂ ~30 g > ♀; diferencia mínima.
+")
+```
+
+### 3.9 Defunciones por sexo (donut)
+
+```{r p9_donut, echo=FALSE, fig.cap="Defunciones por sexo (2021‑2023)"}
+sexo_def <- defunciones |> count(sexo) |> mutate(prop = n/sum(n))
+
+ggplot(sexo_def, aes(2, prop, fill=factor(sexo))) +
+  geom_col(width=1, color='white') +
+  coord_polar('y') +
+  xlim(.5,2.5) +
+  scale_fill_manual(values=c('#66c2a5','#fc8d62'),
+                    labels=c('Hombre','Mujer'), name='Sexo') +
+  theme_void() +
+  labs(title='Defunciones por sexo (2021‑2023)')
+```
+
+```{r desc_p9_donut, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 9**  
+♂ ≈55 % | ♀ ≈45 %; mayor mortalidad masculina.
+")
+```
+
+### 3.10 Edad al fallecer por sexo (density‑ridge)
+
+```{r p10_ridge, echo=FALSE, fig.cap="Distribución de edad al fallecer por sexo"}
+ggplot(defunciones, aes(edadif, factor(sexo, labels=c('Hombre','Mujer')), fill=factor(sexo))) +
+  ggridges::geom_density_ridges(alpha=.8, show.legend=FALSE) +
+  labs(title='Distribución de edad al fallecer por sexo', x='Edad (años)', y='')
+```
+
+```{r desc_p10_ridge, echo=FALSE, results='asis'}
+cat("
+**Descripción de la gráfica 10**  
+Pico neonatal en ambos.  
+♂ máx. ~65-70 a; ♂ más dispersión 20-60 a.  
+♀ máx. ~75-80 a y mayor densidad >80 a (mayor longevidad).
+")
+```
